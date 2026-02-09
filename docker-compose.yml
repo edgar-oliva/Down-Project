@@ -1,0 +1,8 @@
+services:
+  web:
+    build: .
+    ports:
+      - "9090:5000"
+    volumes:
+      - ./downloads:/app/downloads
+    restart: unless-stopped

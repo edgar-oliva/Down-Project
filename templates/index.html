@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Media Downloader</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Media Downloader</h1>
+            <p class="subtitle">Download images and videos from any webpage</p>
+        </header>
+
+        <!-- URL Input -->
+        <div class="input-section">
+            <div class="input-row">
+                <input
+                    type="url"
+                    id="urlInput"
+                    placeholder="Paste a webpage URL here..."
+                    autocomplete="off"
+                    spellcheck="false"
+                >
+                <button id="scanBtn" onclick="scanPage()">Scan</button>
+            </div>
+            <div class="options-row">
+                <label class="radio-label">
+                    <input type="radio" name="mode" value="all" checked> All Media
+                </label>
+                <label class="radio-label">
+                    <input type="radio" name="mode" value="images"> Images Only
+                </label>
+                <label class="radio-label">
+                    <input type="radio" name="mode" value="videos"> Videos Only
+                </label>
+                <span class="options-divider"></span>
+                <label class="toggle-label" title="Clicks into each video link on the page to find the real video file. Use this when the page shows video thumbnails as tiles.">
+                    <input type="checkbox" id="deepScan">
+                    <span class="toggle-switch"></span>
+                    Deep Scan
+                </label>
+            </div>
+        </div>
+
+        <!-- Scanning Spinner -->
+        <div id="scanningSpinner" class="scanning-spinner hidden">
+            <div class="spinner"></div>
+            <span>Scanning page for media...</span>
+        </div>
+
+        <!-- Preview Section (shown after scan) -->
+        <div id="previewSection" class="preview-section hidden">
+            <div class="preview-header">
+                <div class="preview-title">
+                    <h2>Found Media</h2>
+                    <span id="previewCount" class="preview-count"></span>
+                </div>
+                <div class="preview-actions">
+                    <button class="select-btn" onclick="selectAll()">Select All</button>
+                    <button class="select-btn" onclick="deselectAll()">Deselect All</button>
+                    <button id="downloadSelectedBtn" class="download-btn" onclick="downloadSelected()">
+                        Download Selected (<span id="selectedCount">0</span>)
+                    </button>
+                </div>
+            </div>
+            <div id="previewGrid" class="preview-grid"></div>
+        </div>
+
+        <!-- Progress Section (hidden by default) -->
+        <div id="progressSection" class="progress-section hidden">
+            <div class="progress-header">
+                <span id="statusText">Initializing...</span>
+                <span id="etaText"></span>
+            </div>
+
+            <!-- Scan Results -->
+            <div id="scanResults" class="scan-results hidden">
+                <div class="scan-item">
+                    <span class="scan-icon">&#128247;</span>
+                    <span id="scanImages">0</span> images
+                </div>
+                <div class="scan-item">
+                    <span class="scan-icon">&#127909;</span>
+                    <span id="scanVideos">0</span> videos
+                </div>
+            </div>
+
+            <!-- Overall Progress Bar -->
+            <div class="progress-bar-container">
+                <div class="progress-bar" id="overallProgress"></div>
+            </div>
+            <div class="progress-stats">
+                <span id="progressDetail"></span>
+                <span id="bytesDownloaded"></span>
+            </div>
+
+            <!-- Current File -->
+            <div id="currentFile" class="current-file hidden">
+                <div class="file-name" id="currentFileName"></div>
+                <div class="file-progress-bar-container">
+                    <div class="file-progress-bar" id="fileProgress"></div>
+                </div>
+            </div>
+
+            <!-- Log -->
+            <div id="logContainer" class="log-container">
+                <div id="logContent"></div>
+            </div>
+        </div>
+
+        <!-- Results Section (hidden by default) -->
+        <div id="resultsSection" class="results-section hidden">
+            <div class="results-card">
+                <h2>Download Complete</h2>
+                <div class="results-grid">
+                    <div class="result-item">
+                        <span class="result-number" id="resultImages">0</span>
+                        <span class="result-label">Images</span>
+                    </div>
+                    <div class="result-item">
+                        <span class="result-number" id="resultVideos">0</span>
+                        <span class="result-label">Videos</span>
+                    </div>
+                    <div class="result-item">
+                        <span class="result-number" id="resultSkipped">0</span>
+                        <span class="result-label">Skipped</span>
+                    </div>
+                    <div class="result-item">
+                        <span class="result-number" id="resultTime">0s</span>
+                        <span class="result-label">Total Time</span>
+                    </div>
+                </div>
+                <div class="result-bytes" id="resultBytes"></div>
+                <button class="zip-btn" id="zipBtn" onclick="downloadZip()">
+                    Download as ZIP
+                </button>
+                <button class="new-btn" onclick="resetUI()">New Download</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>
