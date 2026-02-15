@@ -51,6 +51,13 @@ YTDLP_DIRECT_DOMAINS = {
     "instagram.com", "www.instagram.com",
     "tiktok.com", "www.tiktok.com",
     "vm.tiktok.com",
+    "facebook.com", "www.facebook.com",
+    "m.facebook.com", "fb.watch",
+    "web.facebook.com",
+    "youtube.com", "www.youtube.com",
+    "m.youtube.com", "youtu.be",
+    "twitter.com", "www.twitter.com",
+    "x.com", "www.x.com",
 }
 
 
@@ -328,13 +335,17 @@ def download_with_ytdlp(url: str, output_dir: str, job_id: str) -> bool:
         return False
 
 
-def run_download_job(job_id: str, url: str, mode: str, selected_urls: list[str] | None = None):
+def run_download_job(job_id: str, url: str, mode: str, selected_urls: list[str] | None = None, folder_name: str = ""):
     """Main download worker that runs in a background thread."""
     try:
         parsed = urlparse(url)
         domain = parsed.netloc.replace("www.", "")
         timestamp = time.strftime("%Y%m%d_%H%M%S")
-        output_dir = DOWNLOADS_DIR / f"{sanitize_filename(domain)}_{timestamp}"
+        if folder_name:
+            dir_name = sanitize_filename(folder_name)
+        else:
+            dir_name = f"{sanitize_filename(domain)}_{timestamp}"
+        output_dir = DOWNLOADS_DIR / dir_name
         images_dir = output_dir / "images"
         videos_dir = output_dir / "videos"
 
@@ -1106,33 +1117,25 @@ def scan_page():
         if deep_scan:
             return _deep_scan(url, mode, parsed)
 
-        # ----- Fast path: Instagram / TikTok → yt-dlp directly -----
+        # ----- Social media URLs: redirect user to the Social Media tab -----
         if is_ytdlp_direct_url(url):
-            ytdlp_videos = _extract_ytdlp_info(url)
-
-            if not ytdlp_videos:
-                return jsonify({"error": "Could not extract video info. The URL may be private or invalid."}), 400
-
             host = parsed.netloc.lower()
             if "instagram" in host:
                 platform = "Instagram"
             elif "tiktok" in host:
                 platform = "TikTok"
+            elif "facebook" in host or "fb.watch" in host:
+                platform = "Facebook"
+            elif "youtube" in host or "youtu.be" in host:
+                platform = "YouTube"
+            elif "twitter" in host or "x.com" in host:
+                platform = "X/Twitter"
             else:
-                platform = "Video"
-
-            for yt_vid in ytdlp_videos:
-                duration = yt_vid.get("duration")
-                dur_str = f" ({int(duration)}s)" if duration else ""
-                media_items.append({
-                    "type": "ytdlp_video",
-                    "url": yt_vid["url"],
-                    "filename": sanitize_filename(yt_vid["title"]) + dur_str,
-                    "preview_url": yt_vid["thumbnail"],
-                    "platform": platform,
-                })
-
-            return jsonify({"items": media_items, "scanned_url": url})
+                platform = "this platform"
+            return jsonify({
+                "error": f"Use the Social Media tab to download from {platform}. "
+                         f"Switch to the Social Media tab, paste your URL there, and click Download."
+            }), 400
 
         # ----- Standard path: Playwright + in-browser JS extraction -----
         with sync_playwright() as pw:
@@ -1268,12 +1271,159 @@ def scan_page():
         return jsonify({"error": str(e)}), 500
 
 
+SOCIAL_DOMAINS = {
+    "instagram.com", "www.instagram.com",
+    "tiktok.com", "www.tiktok.com", "vm.tiktok.com",
+    "facebook.com", "www.facebook.com", "m.facebook.com",
+    "fb.watch", "web.facebook.com",
+    "youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be",
+    "twitter.com", "www.twitter.com", "x.com", "www.x.com",
+}
+
+
+def run_social_download_job(job_id: str, url: str, folder_name: str):
+    """Download video/media from a social media URL using yt-dlp with max quality."""
+    try:
+        parsed = urlparse(url)
+        host = parsed.netloc.lower()
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+
+        if folder_name:
+            dir_name = sanitize_filename(folder_name)
+        else:
+            domain = host.replace("www.", "")
+            dir_name = f"{sanitize_filename(domain)}_{timestamp}"
+
+        output_dir = DOWNLOADS_DIR / dir_name
+        videos_dir = output_dir / "videos"
+        videos_dir.mkdir(parents=True, exist_ok=True)
+
+        with jobs_lock:
+            jobs[job_id]["output_dir"] = str(output_dir)
+
+        push_event(job_id, "status", {"step": "Extracting video info...", "phase": "fetch"})
+
+        if not YT_DLP_AVAILABLE:
+            push_event(job_id, "error", {"message": "yt-dlp is not installed."})
+            return
+
+        def progress_hook(d):
+            if d["status"] == "downloading":
+                total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
+                downloaded = d.get("downloaded_bytes", 0)
+                speed = d.get("speed") or 0
+                eta = d.get("eta") or 0
+                push_event(job_id, "ytdlp_progress", {
+                    "url": url[:80],
+                    "downloaded": downloaded,
+                    "total_bytes": total,
+                    "speed": speed,
+                    "eta": eta,
+                })
+            elif d["status"] == "finished":
+                push_event(job_id, "log", {
+                    "message": f"Downloaded: {d.get('filename', 'video')}",
+                })
+
+        def postprocessor_hook(d):
+            if d["status"] == "started":
+                push_event(job_id, "status", {
+                    "step": "Re-encoding for macOS compatibility (this may take a moment)...",
+                    "phase": "videos",
+                })
+            elif d["status"] == "finished":
+                push_event(job_id, "log", {"message": "Re-encoding complete"})
+
+        ydl_opts = {
+            "format": (
+                "bestvideo[vcodec^=avc1]+bestaudio[acodec^=mp4a]/"
+                "bestvideo[vcodec^=avc1]+bestaudio/"
+                "bestvideo+bestaudio/best"
+            ),
+            "merge_output_format": "mp4",
+            "postprocessor_args": {
+                "merger": ["-c:v", "libx264", "-preset", "veryfast",
+                           "-c:a", "aac", "-movflags", "+faststart"],
+            },
+            "outtmpl": os.path.join(str(videos_dir), "%(title)s.%(ext)s"),
+            "quiet": True,
+            "no_warnings": True,
+            "progress_hooks": [progress_hook],
+            "postprocessor_hooks": [postprocessor_hook],
+        }
+
+        push_event(job_id, "status", {"step": "Downloading at best quality...", "phase": "videos"})
+
+        overall_start = time.time()
+        downloaded_videos = 0
+        skipped = 0
+
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=True)
+                if info:
+                    if "entries" in info:
+                        downloaded_videos = len([e for e in info["entries"] if e])
+                    else:
+                        downloaded_videos = 1
+        except Exception as e:
+            push_event(job_id, "log", {"message": f"yt-dlp error: {e}"})
+            skipped = 1
+
+        total_elapsed = time.time() - overall_start
+
+        push_event(job_id, "complete", {
+            "images_downloaded": 0,
+            "videos_downloaded": downloaded_videos,
+            "skipped": skipped,
+            "total_time": round(total_elapsed, 1),
+            "total_bytes": 0,
+            "output_dir": str(output_dir),
+        })
+
+    except Exception as e:
+        push_event(job_id, "error", {"message": str(e)})
+
+
+@app.route("/api/social-download", methods=["POST"])
+def social_download():
+    """Download video from a social media platform using yt-dlp at max quality."""
+    data = request.get_json()
+    url = (data or {}).get("url", "").strip()
+    folder_name = (data or {}).get("folder_name", "").strip()
+
+    if not url:
+        return jsonify({"error": "URL is required"}), 400
+
+    parsed = urlparse(url)
+    if not parsed.scheme:
+        url = "https://" + url
+        parsed = urlparse(url)
+    if not parsed.netloc:
+        return jsonify({"error": "Invalid URL"}), 400
+
+    if not YT_DLP_AVAILABLE:
+        return jsonify({"error": "yt-dlp is not installed on the server"}), 500
+
+    job_id = str(uuid.uuid4())
+    with jobs_lock:
+        jobs[job_id] = {"events": [], "output_dir": None}
+
+    thread = threading.Thread(
+        target=run_social_download_job, args=(job_id, url, folder_name), daemon=True
+    )
+    thread.start()
+
+    return jsonify({"job_id": job_id})
+
+
 @app.route("/api/download", methods=["POST"])
 def start_download():
     data = request.get_json()
     url = (data or {}).get("url", "").strip()
     mode = (data or {}).get("mode", "all")  # all | images | videos
     selected_urls = (data or {}).get("selected_urls")  # list of URLs to download, or None for all
+    folder_name = (data or {}).get("folder_name", "").strip()  # optional custom folder name
 
     if not url:
         return jsonify({"error": "URL is required"}), 400
@@ -1290,7 +1440,7 @@ def start_download():
         jobs[job_id] = {"events": [], "output_dir": None}
 
     thread = threading.Thread(
-        target=run_download_job, args=(job_id, url, mode, selected_urls), daemon=True
+        target=run_download_job, args=(job_id, url, mode, selected_urls, folder_name), daemon=True
     )
     thread.start()
 

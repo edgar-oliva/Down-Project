@@ -2,6 +2,7 @@ let currentJobId = null;
 let eventSource = null;
 let scannedUrl = null;
 let mediaItems = []; // items returned from /api/scan
+let activeTab = "website";
 
 function formatBytes(bytes) {
     if (!bytes || bytes === 0) return "0 B";
@@ -179,6 +180,38 @@ function updateSelectionCount() {
 
 function downloadSelected() {
     const selectedCards = document.querySelectorAll(".preview-card.selected");
+    if (selectedCards.length === 0) return;
+
+    // Generate a default folder name from the URL domain
+    let defaultName = "";
+    try {
+        const host = new URL(scannedUrl).hostname.replace(/^www\./, "");
+        defaultName = host;
+    } catch (_) {}
+
+    const input = document.getElementById("folderNameInput");
+    input.value = defaultName;
+    document.getElementById("folderModal").classList.remove("hidden");
+    setTimeout(() => { input.focus(); input.select(); }, 50);
+}
+
+function closeFolderModal() {
+    document.getElementById("folderModal").classList.add("hidden");
+}
+
+function confirmModalDownload() {
+    if (activeTab === "social") {
+        confirmSocialDownload();
+    } else {
+        confirmDownload();
+    }
+}
+
+function confirmDownload() {
+    const folderName = document.getElementById("folderNameInput").value.trim();
+    closeFolderModal();
+
+    const selectedCards = document.querySelectorAll(".preview-card.selected");
     const selectedUrls = [];
     selectedCards.forEach((card) => {
         const idx = parseInt(card.dataset.index);
@@ -206,14 +239,19 @@ function downloadSelected() {
 
     addLog("Downloading " + selectedUrls.length + " selected items...", "info");
 
+    const payload = {
+        url: scannedUrl,
+        mode: mode,
+        selected_urls: selectedUrls,
+    };
+    if (folderName) {
+        payload.folder_name = folderName;
+    }
+
     fetch("/api/download", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-            url: scannedUrl,
-            mode: mode,
-            selected_urls: selectedUrls,
-        }),
+        body: JSON.stringify(payload),
     })
         .then((r) => r.json())
         .then((data) => {
@@ -244,6 +282,17 @@ function listenToProgress(jobId) {
         const data = JSON.parse(e.data);
         document.getElementById("statusText").textContent = data.step;
         addLog(data.step, "info");
+
+        // Show encoding spinner when re-encoding, hide download bars
+        if (data.step.includes("Re-encoding")) {
+            document.getElementById("downloadProgress").classList.add("hidden");
+            document.getElementById("currentFile").classList.add("hidden");
+            document.getElementById("encodingSpinner").classList.remove("hidden");
+            document.getElementById("encodingSpinner").querySelector("span").textContent = data.step;
+        } else {
+            document.getElementById("encodingSpinner").classList.add("hidden");
+            document.getElementById("downloadProgress").classList.remove("hidden");
+        }
     });
 
     eventSource.addEventListener("scan_result", function (e) {
@@ -340,6 +389,8 @@ function listenToProgress(jobId) {
         document.getElementById("statusText").textContent = "Complete!";
         document.getElementById("etaText").textContent = "";
         document.getElementById("currentFile").classList.add("hidden");
+        document.getElementById("encodingSpinner").classList.add("hidden");
+        document.getElementById("downloadProgress").classList.remove("hidden");
 
         // Show results
         document.getElementById("progressSection").classList.add("hidden");
@@ -374,6 +425,8 @@ function listenToProgress(jobId) {
         document.getElementById("statusText").textContent = "Error occurred";
         document.getElementById("scanBtn").disabled = false;
         document.getElementById("urlInput").disabled = false;
+        document.getElementById("socialDownloadBtn").disabled = false;
+        document.getElementById("socialUrlInput").disabled = false;
         if (eventSource) {
             eventSource.close();
             eventSource = null;
@@ -395,15 +448,208 @@ function resetUI() {
     document.getElementById("urlInput").value = "";
     document.getElementById("urlInput").disabled = false;
     document.getElementById("scanBtn").disabled = false;
-    document.getElementById("urlInput").focus();
+    document.getElementById("socialUrlInput").value = "";
+    document.getElementById("socialUrlInput").disabled = false;
+    document.getElementById("socialDownloadBtn").disabled = false;
+    document.getElementById("platformBadge").classList.add("hidden");
     currentJobId = null;
     scannedUrl = null;
     mediaItems = [];
+
+    if (activeTab === "website") {
+        document.getElementById("urlInput").focus();
+    } else {
+        document.getElementById("socialUrlInput").focus();
+    }
 }
+
+// -----------------------------------------------------------------------
+// Tab switching
+// -----------------------------------------------------------------------
+
+function switchTab(tab) {
+    activeTab = tab;
+
+    // Update tab buttons
+    document.querySelectorAll(".tab-btn").forEach((btn) => {
+        btn.classList.toggle("active", btn.dataset.tab === tab);
+    });
+
+    // Show/hide tab content
+    document.getElementById("websiteTab").classList.toggle("hidden", tab !== "website");
+    document.getElementById("socialTab").classList.toggle("hidden", tab !== "social");
+
+    // Hide shared sections when switching
+    document.getElementById("progressSection").classList.add("hidden");
+    document.getElementById("resultsSection").classList.add("hidden");
+}
+
+// -----------------------------------------------------------------------
+// Social media platform detection
+// -----------------------------------------------------------------------
+
+const SOCIAL_PLATFORMS = {
+    "youtube.com": { name: "YouTube", css: "youtube" },
+    "www.youtube.com": { name: "YouTube", css: "youtube" },
+    "m.youtube.com": { name: "YouTube", css: "youtube" },
+    "youtu.be": { name: "YouTube", css: "youtube" },
+    "facebook.com": { name: "Facebook", css: "facebook" },
+    "www.facebook.com": { name: "Facebook", css: "facebook" },
+    "m.facebook.com": { name: "Facebook", css: "facebook" },
+    "web.facebook.com": { name: "Facebook", css: "facebook" },
+    "fb.watch": { name: "Facebook", css: "facebook" },
+    "instagram.com": { name: "Instagram", css: "instagram" },
+    "www.instagram.com": { name: "Instagram", css: "instagram" },
+    "tiktok.com": { name: "TikTok", css: "tiktok" },
+    "www.tiktok.com": { name: "TikTok", css: "tiktok" },
+    "vm.tiktok.com": { name: "TikTok", css: "tiktok" },
+    "twitter.com": { name: "X / Twitter", css: "twitter" },
+    "www.twitter.com": { name: "X / Twitter", css: "twitter" },
+    "x.com": { name: "X / Twitter", css: "twitter" },
+    "www.x.com": { name: "X / Twitter", css: "twitter" },
+};
+
+function detectPlatform(url) {
+    try {
+        const host = new URL(url).hostname.toLowerCase();
+        return SOCIAL_PLATFORMS[host] || null;
+    } catch (_) {
+        return null;
+    }
+}
+
+function updatePlatformBadge() {
+    const url = document.getElementById("socialUrlInput").value.trim();
+    const badge = document.getElementById("platformBadge");
+
+    if (!url) {
+        badge.classList.add("hidden");
+        return;
+    }
+
+    const platform = detectPlatform(url);
+    if (platform) {
+        badge.textContent = platform.name;
+        badge.className = "platform-badge " + platform.css;
+        badge.classList.remove("hidden");
+    } else {
+        badge.classList.add("hidden");
+    }
+}
+
+// -----------------------------------------------------------------------
+// Social media download
+// -----------------------------------------------------------------------
+
+function socialDownload() {
+    const urlInput = document.getElementById("socialUrlInput");
+    const url = urlInput.value.trim();
+    if (!url) {
+        urlInput.focus();
+        return;
+    }
+
+    const platform = detectPlatform(url);
+
+    // Pre-fill folder name with platform name or domain
+    let defaultName = "";
+    if (platform) {
+        defaultName = platform.name;
+    } else {
+        try {
+            defaultName = new URL(url).hostname.replace(/^www\./, "");
+        } catch (_) {}
+    }
+
+    const input = document.getElementById("folderNameInput");
+    input.value = defaultName;
+    document.getElementById("folderModal").classList.remove("hidden");
+    setTimeout(() => { input.focus(); input.select(); }, 50);
+}
+
+function confirmSocialDownload() {
+    const folderName = document.getElementById("folderNameInput").value.trim();
+    closeFolderModal();
+
+    const url = document.getElementById("socialUrlInput").value.trim();
+    if (!url) return;
+
+    // Hide social tab input section visually, show progress
+    document.getElementById("progressSection").classList.remove("hidden");
+    document.getElementById("resultsSection").classList.add("hidden");
+    document.getElementById("logContent").innerHTML = "";
+    document.getElementById("scanResults").classList.add("hidden");
+    document.getElementById("currentFile").classList.remove("hidden");
+    document.getElementById("overallProgress").style.width = "0%";
+    document.getElementById("statusText").textContent = "Starting social media download...";
+    document.getElementById("etaText").textContent = "";
+    document.getElementById("progressDetail").textContent = "";
+    document.getElementById("bytesDownloaded").textContent = "";
+    document.getElementById("currentFileName").textContent = "";
+    document.getElementById("socialDownloadBtn").disabled = true;
+    document.getElementById("socialUrlInput").disabled = true;
+
+    const platform = detectPlatform(url);
+    addLog("Downloading from " + (platform ? platform.name : url) + "...", "info");
+
+    const payload = { url: url };
+    if (folderName) payload.folder_name = folderName;
+
+    fetch("/api/social-download", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+    })
+        .then((r) => r.json())
+        .then((data) => {
+            if (data.error) {
+                addLog("Error: " + data.error, "error");
+                document.getElementById("statusText").textContent = "Error";
+                document.getElementById("socialDownloadBtn").disabled = false;
+                document.getElementById("socialUrlInput").disabled = false;
+                return;
+            }
+            currentJobId = data.job_id;
+            listenToProgress(data.job_id);
+        })
+        .catch((err) => {
+            addLog("Request failed: " + err, "error");
+            document.getElementById("socialDownloadBtn").disabled = false;
+            document.getElementById("socialUrlInput").disabled = false;
+        });
+}
+
+// -----------------------------------------------------------------------
+// Event listeners
+// -----------------------------------------------------------------------
 
 // Allow Enter key to trigger scan
 document.getElementById("urlInput").addEventListener("keydown", function (e) {
     if (e.key === "Enter") {
         scanPage();
+    }
+});
+
+// Social URL input: detect platform on input, Enter to download
+document.getElementById("socialUrlInput").addEventListener("input", updatePlatformBadge);
+document.getElementById("socialUrlInput").addEventListener("paste", function () {
+    setTimeout(updatePlatformBadge, 0);
+});
+document.getElementById("socialUrlInput").addEventListener("keydown", function (e) {
+    if (e.key === "Enter") {
+        socialDownload();
+    }
+});
+
+// Allow Enter to confirm and Escape to cancel in folder modal
+document.getElementById("folderNameInput").addEventListener("keydown", function (e) {
+    if (e.key === "Enter") {
+        if (activeTab === "social") {
+            confirmSocialDownload();
+        } else {
+            confirmDownload();
+        }
+    } else if (e.key === "Escape") {
+        closeFolderModal();
     }
 });
