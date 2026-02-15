@@ -335,6 +335,129 @@ def download_with_ytdlp(url: str, output_dir: str, job_id: str) -> bool:
         return False
 
 
+def _download_videos_via_browser(urls: list[str], output_dir: str, job_id: str,
+                                  session: requests.Session) -> tuple[int, int, int]:
+    """Fallback: visit each video page in Playwright, extract the real video URL,
+    and download it directly. Reuses one browser so cookies (age-gate) persist."""
+    downloaded = 0
+    skipped = 0
+    total_bytes = 0
+
+    try:
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(
+                headless=True,
+                args=["--disable-blink-features=AutomationControlled"],
+            )
+            context = browser.new_context(
+                user_agent=HEADERS["User-Agent"],
+                viewport={"width": 1920, "height": 1080},
+            )
+
+            for i, url in enumerate(urls, 1):
+                push_event(job_id, "status", {
+                    "step": f"Browser extracting video {i}/{len(urls)}...",
+                    "phase": "videos",
+                })
+
+                captured = []
+
+                def _make_handler(target_list):
+                    def _handler(response):
+                        try:
+                            ct = response.headers.get("content-type", "")
+                            if "video/" in ct:
+                                size = int(response.headers.get("content-length", 0))
+                                target_list.append({"url": response.url, "size": size})
+                        except Exception:
+                            pass
+                    return _handler
+
+                page = context.new_page()
+                page.on("response", _make_handler(captured))
+
+                try:
+                    page.goto(url, wait_until="networkidle", timeout=30000)
+                    _dismiss_age_gate(page)
+
+                    # Try to trigger video playback
+                    page.evaluate("""
+                        () => {
+                            const v = document.querySelector('video');
+                            if (v) try { v.play(); } catch(e) {}
+                            document.querySelectorAll(
+                                '[class*="play"], [class*="Play"], ' +
+                                '.vjs-big-play-button, .plyr__control--overlaid'
+                            ).forEach(btn => { try { btn.click(); } catch(e) {} });
+                        }
+                    """)
+                    page.wait_for_timeout(5000)
+
+                    # Also grab from DOM
+                    dom_vids = page.evaluate("""
+                        () => {
+                            const r = [];
+                            document.querySelectorAll('video').forEach(v => {
+                                if (v.src && !v.src.startsWith('blob:')) r.push(v.src);
+                                v.querySelectorAll('source').forEach(s => {
+                                    if (s.src && !s.src.startsWith('blob:')) r.push(s.src);
+                                });
+                            });
+                            return r;
+                        }
+                    """)
+                    page.close()
+
+                    for dv in dom_vids:
+                        captured.append({"url": dv, "size": 0})
+
+                    # Deduplicate, prefer largest
+                    seen = set()
+                    unique = []
+                    for v in captured:
+                        if v["url"] not in seen:
+                            seen.add(v["url"])
+                            unique.append(v)
+                    unique.sort(key=lambda x: x.get("size", 0), reverse=True)
+
+                    if unique:
+                        best_url = unique[0]["url"]
+                        filename = get_filename_from_url(best_url)
+                        if not os.path.splitext(filename)[1]:
+                            filename += ".mp4"
+                        dest = os.path.join(output_dir, filename)
+                        if os.path.exists(dest):
+                            stem, ext = os.path.splitext(filename)
+                            dest = os.path.join(output_dir, f"{stem}_{i}{ext}")
+
+                        success, nbytes = download_file(best_url, dest, session, job_id, filename)
+                        if success:
+                            downloaded += 1
+                            total_bytes += nbytes
+                        else:
+                            skipped += 1
+                    else:
+                        push_event(job_id, "log", {"message": f"No video found: {url[:60]}"})
+                        skipped += 1
+
+                except Exception as e:
+                    push_event(job_id, "log", {"message": f"Failed: {url[:60]} - {e}"})
+                    skipped += 1
+                    try:
+                        page.close()
+                    except Exception:
+                        pass
+
+            browser.close()
+
+    except Exception as e:
+        push_event(job_id, "log", {"message": f"Browser session error: {e}"})
+        remaining = len(urls) - downloaded - skipped
+        skipped += remaining
+
+    return downloaded, skipped, total_bytes
+
+
 def run_download_job(job_id: str, url: str, mode: str, selected_urls: list[str] | None = None, folder_name: str = ""):
     """Main download worker that runs in a background thread."""
     try:
@@ -500,17 +623,34 @@ def run_download_job(job_id: str, url: str, mode: str, selected_urls: list[str] 
             else:
                 skipped += 1
 
-        # yt-dlp videos
+        # yt-dlp videos (with Playwright fallback for failures)
         if ytdlp_urls:
             push_event(job_id, "status", {
                 "step": f"Downloading {len(ytdlp_urls)} video(s) via yt-dlp...",
                 "phase": "videos",
             })
+            failed_urls = []
             for yt_url in ytdlp_urls:
                 if download_with_ytdlp(yt_url, str(videos_dir), job_id):
                     downloaded_videos += 1
                 else:
-                    skipped += 1
+                    failed_urls.append(yt_url)
+
+            # Fallback: use Playwright to visit each page and extract video
+            if failed_urls:
+                push_event(job_id, "status", {
+                    "step": f"Retrying {len(failed_urls)} video(s) with browser extraction...",
+                    "phase": "videos",
+                })
+                push_event(job_id, "log", {
+                    "message": f"yt-dlp failed for {len(failed_urls)} URL(s), trying browser fallback...",
+                })
+                d, s, b = _download_videos_via_browser(
+                    failed_urls, str(videos_dir), job_id, session
+                )
+                downloaded_videos += d
+                skipped += s
+                total_bytes += b
 
         total_elapsed = time.time() - overall_start
 
