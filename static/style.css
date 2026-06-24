@@ -138,6 +138,39 @@ header h1 {
 #socialUrlInput:focus { border-color: #6366f1; }
 #socialUrlInput::placeholder { color: #555; }
 
+/* Main Video Tab Styling */
+#mainVideoDownloadBtn {
+    background: linear-gradient(135deg, #6366f1, #a855f7);
+    color: white;
+    border: none;
+    border-radius: 10px;
+    padding: 14px 28px;
+    font-size: 1rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: opacity 0.2s, transform 0.1s;
+    white-space: nowrap;
+}
+
+#mainVideoDownloadBtn:hover { opacity: 0.9; }
+#mainVideoDownloadBtn:active { transform: scale(0.97); }
+#mainVideoDownloadBtn:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+
+#mainVideoUrlInput {
+    flex: 1;
+    background: #12121f;
+    border: 1px solid #333;
+    border-radius: 10px;
+    padding: 14px 18px;
+    font-size: 1rem;
+    color: #e0e0e0;
+    outline: none;
+    transition: border-color 0.2s;
+}
+
+#mainVideoUrlInput:focus { border-color: #6366f1; }
+#mainVideoUrlInput::placeholder { color: #555; }
+
 /* Input Section */
 .input-section {
     background: #1a1a2e;
@@ -844,6 +877,58 @@ header h1 {
 
 .modal-confirm:hover {
     opacity: 0.9;
+}
+
+/* Preview Modal Specific */
+.preview-modal {
+    max-width: 680px;
+    width: calc(100% - 40px);
+}
+
+.preview-content {
+    margin-bottom: 20px;
+}
+
+.preview-thumbnail {
+    display: block;
+    margin: 0 auto 12px auto;
+    width: auto;
+    max-width: 480px;
+    max-height: 180px;
+    object-fit: contain;
+    border-radius: 8px;
+    background: #0f0f1a;
+}
+
+.preview-thumbnail.hidden {
+    display: none;
+}
+
+.preview-info {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.preview-detail {
+    display: flex;
+    align-items: center;
+    padding: 10px;
+    background: #12121f;
+    border-radius: 8px;
+    border: 1px solid #2a2a4a;
+}
+
+.preview-detail label {
+    font-weight: 600;
+    color: #999;
+    min-width: 80px;
+    margin-right: 12px;
+}
+
+.preview-detail span {
+    color: #e0e0e0;
+    word-break: break-word;
 }
 
 /* Utilities */

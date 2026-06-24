@@ -4,6 +4,8 @@ Media Downloader - Web Application
 Flask backend that downloads images and videos from any URL.
 """
 
+from __future__ import annotations
+
 import os
 import re
 import json
@@ -309,15 +311,18 @@ def download_with_ytdlp(url: str, output_dir: str, job_id: str) -> bool:
             })
 
     ydl_opts = {
-        # Prefer H.264 + AAC (QuickTime/macOS compatible), fall back to best available
+        # Prefer H.264 + AAC (QuickTime/macOS compatible).
+        # best[ext=mp4] and best are pre-merged single-stream fallbacks that
+        # don't require ffmpeg, ensuring downloads succeed even without it.
         "format": (
             "bestvideo[vcodec^=avc1]+bestaudio[acodec^=mp4a]/"
             "bestvideo[vcodec^=avc1]+bestaudio/"
-            "bestvideo+bestaudio/best"
+            "best[ext=mp4]/"
+            "bestvideo+bestaudio/"
+            "best"
         ),
-        "outtmpl": os.path.join(output_dir, "%(title)s.%(ext)s"),
+        "outtmpl": os.path.join(output_dir, "%(title).100s.%(ext)s"),
         "merge_output_format": "mp4",
-        # Re-encode to H.264/AAC if the source codec isn't compatible
         "postprocessor_args": {
             "merger": ["-c:v", "libx264", "-c:a", "aac", "-movflags", "+faststart"],
         },
@@ -1421,6 +1426,213 @@ SOCIAL_DOMAINS = {
 }
 
 
+def _extract_main_video(url: str, job_id: str) -> dict:
+    """
+    Extract the main/primary video URL from a webpage.
+    Returns dict with 'url' and 'title' keys, or empty dict if not found.
+    Only used for non-social-media URLs.
+    """
+    video_url = ""
+    video_title = ""
+    
+    parsed = urlparse(url)
+    host = parsed.netloc.lower().replace("www.", "")
+    
+    # Try to extract video from page HTML
+    push_event(job_id, "log", {"message": "Scanning page for main video..."})
+    try:
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(headless=True)
+            page = browser.new_page()
+            page.goto(url, wait_until="networkidle", timeout=30000)
+            
+            _dismiss_age_gate(page)
+            
+            # Scroll to load lazy content
+            _scroll_to_load_all(page, max_rounds=30)
+            
+            # Get all video elements and find the largest one
+            videos = page.evaluate("""
+                () => {
+                    const results = [];
+                    const videoTags = document.querySelectorAll('video');
+                    
+                    for (const video of videoTags) {
+                        const style = window.getComputedStyle(video);
+                        const width = parseInt(style.width) || video.offsetWidth || 0;
+                        const height = parseInt(style.height) || video.offsetHeight || 0;
+                        const area = width * height;
+                        const display = style.display;
+                        const visible = display !== 'none' && style.visibility !== 'hidden';
+                        
+                        let src = video.src || '';
+                        if (!src) {
+                            const source = video.querySelector('source');
+                            if (source) src = source.src || '';
+                        }
+                        
+                        if (src) {
+                            results.push({
+                                src: src,
+                                width: width,
+                                height: height,
+                                area: area,
+                                visible: visible,
+                                title: video.title || '',
+                            });
+                        }
+                    }
+                    
+                    // Also check for video in <A> tags
+                    for (const a of document.querySelectorAll('a[href]')) {
+                        const href = a.href;
+                        if (/\.(mp4|webm|m4v|mov)$/i.test(href)) {
+                            results.push({
+                                src: href,
+                                width: 0,
+                                height: 0,
+                                area: 0,
+                                visible: true,
+                                title: a.textContent.trim() || '',
+                            });
+                        }
+                    }
+                    
+                    // Sort by area (largest first), prioritize visible videos
+                    results.sort((a, b) => {
+                        if (a.visible !== b.visible) return a.visible ? -1 : 1;
+                        return b.area - a.area;
+                    });
+                    
+                    return results;
+                }
+            """)
+            
+            browser.close()
+            
+            if videos and len(videos) > 0:
+                main_video = videos[0]
+                video_url = main_video.get("src", "")
+                video_title = main_video.get("title", "main_video")
+                if not video_title or video_title.strip() == "":
+                    video_title = f"main_video_{int(time.time())}"
+                
+                if video_url:
+                    push_event(job_id, "log", {"message": f"Found main video: {video_title}"})
+                    return {"url": video_url, "title": video_title}
+    except Exception as e:
+        push_event(job_id, "log", {"message": f"Page scanning failed: {e}"})
+    
+    return {}
+
+
+def run_main_video_download_job(job_id: str, url: str, folder_name: str):
+    """Download the main/primary video from a URL."""
+    try:
+        parsed = urlparse(url)
+        if not parsed.scheme:
+            url = "https://" + url
+            parsed = urlparse(url)
+        
+        host = parsed.netloc.lower().replace("www.", "")
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        
+        if folder_name:
+            dir_name = sanitize_filename(folder_name)
+        else:
+            dir_name = f"main_video_{host}_{timestamp}"
+        
+        output_dir = DOWNLOADS_DIR / dir_name
+        videos_dir = output_dir / "videos"
+        videos_dir.mkdir(parents=True, exist_ok=True)
+        
+        with jobs_lock:
+            jobs[job_id]["output_dir"] = str(output_dir)
+        
+        push_event(job_id, "status", {"step": "Detecting video source...", "phase": "fetch"})
+        
+        # Try yt-dlp first for social media and known platforms
+        if is_ytdlp_direct_url(url) and YT_DLP_AVAILABLE:
+            push_event(job_id, "status", {"step": "Downloading from " + host + "...", "phase": "videos"})
+
+            overall_start = time.time()
+            downloaded_videos = 0
+            skipped = 0
+
+            try:
+                ok = download_with_ytdlp(url, str(videos_dir), job_id)
+                if ok:
+                    downloaded_videos = 1
+                    push_event(job_id, "log", {"message": "yt-dlp: download completed"})
+                else:
+                    skipped = 1
+                    push_event(job_id, "log", {"message": "yt-dlp: download skipped or failed"})
+            except Exception as e:
+                push_event(job_id, "log", {"message": f"yt-dlp unexpected error: {e}"})
+                skipped = 1
+
+            total_elapsed = time.time() - overall_start
+
+            push_event(job_id, "complete", {
+                "images_downloaded": 0,
+                "videos_downloaded": downloaded_videos,
+                "skipped": skipped,
+                "total_time": round(total_elapsed, 1),
+                "total_bytes": 0,
+                "output_dir": str(output_dir),
+            })
+            return
+
+        # Fallback: Extract video URL from page and download it
+        push_event(job_id, "status", {"step": "Extracting main video...", "phase": "fetch"})
+        
+        video_info = _extract_main_video(url, job_id)
+        
+        if not video_info or not video_info.get("url"):
+            push_event(job_id, "error", {"message": "No video found on this page."})
+            return
+        
+        video_url = video_info["url"]
+        video_title = video_info.get("title", "main_video")
+        
+        # Make URLs absolute if they're relative
+        if video_url.startswith("/"):
+            video_url = urljoin(url, video_url)
+        elif not video_url.startswith(("http://", "https://")):
+            video_url = urljoin(url, video_url)
+        
+        push_event(job_id, "status", {"step": "Downloading main video...", "phase": "videos"})
+        
+        # Download the video
+        session = requests.Session()
+        session.headers.update(HEADERS)
+        
+        filename = sanitize_filename(video_title)
+        if not filename.endswith((".mp4", ".webm", ".m4v", ".mov")):
+            filename += ".mp4"
+        
+        dest_path = str(videos_dir / filename)
+        
+        overall_start = time.time()
+        success, total_bytes = download_file(video_url, dest_path, session, job_id, f"Main: {video_title}")
+        total_elapsed = time.time() - overall_start
+        
+        downloaded = 1 if success else 0
+        skipped = 0 if success else 1
+        
+        push_event(job_id, "complete", {
+            "images_downloaded": 0,
+            "videos_downloaded": downloaded,
+            "skipped": skipped,
+            "total_time": round(total_elapsed, 1),
+            "total_bytes": total_bytes if success else 0,
+            "output_dir": str(output_dir),
+        })
+    
+    except Exception as e:
+        push_event(job_id, "error", {"message": f"Main video download failed: {str(e)}"})
+
+
 def run_social_download_job(job_id: str, url: str, folder_name: str):
     """Download video/media from a social media URL using yt-dlp with max quality."""
     try:
@@ -1478,14 +1690,16 @@ def run_social_download_job(job_id: str, url: str, folder_name: str):
             "format": (
                 "bestvideo[vcodec^=avc1]+bestaudio[acodec^=mp4a]/"
                 "bestvideo[vcodec^=avc1]+bestaudio/"
-                "bestvideo+bestaudio/best"
+                "best[ext=mp4]/"
+                "bestvideo+bestaudio/"
+                "best"
             ),
             "merge_output_format": "mp4",
             "postprocessor_args": {
                 "merger": ["-c:v", "libx264", "-preset", "veryfast",
                            "-c:a", "aac", "-movflags", "+faststart"],
             },
-            "outtmpl": os.path.join(str(videos_dir), "%(title)s.%(ext)s"),
+            "outtmpl": os.path.join(str(videos_dir), "%(title).100s.%(ext)s"),
             "quiet": True,
             "no_warnings": True,
             "progress_hooks": [progress_hook],
@@ -1551,6 +1765,147 @@ def social_download():
 
     thread = threading.Thread(
         target=run_social_download_job, args=(job_id, url, folder_name), daemon=True
+    )
+    thread.start()
+
+    return jsonify({"job_id": job_id})
+
+
+@app.route("/api/preview-main-video", methods=["POST"])
+def preview_main_video():
+    """Preview / extract the main video info without downloading."""
+    data = request.get_json()
+    url = (data or {}).get("url", "").strip()
+
+    if not url:
+        return jsonify({"error": "URL is required"}), 400
+
+    parsed = urlparse(url)
+    if not parsed.scheme:
+        url = "https://" + url
+        parsed = urlparse(url)
+    if not parsed.netloc:
+        return jsonify({"error": "Invalid URL"}), 400
+
+    try:
+        # Try yt-dlp first for social media
+        if is_ytdlp_direct_url(url) and YT_DLP_AVAILABLE:
+            try:
+                ydl_opts = {
+                    "format": "best[ext=mp4]/best",
+                    "quiet": True,
+                    "no_warnings": True,
+                }
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    info = ydl.extract_info(url, download=False)
+                    if info:
+                        return jsonify({
+                            "title": info.get("title", "video"),
+                            "thumbnail": info.get("thumbnail", ""),
+                            "duration": info.get("duration", 0),
+                            "platform": "yt-dlp",
+                        })
+            except Exception as e:
+                # If yt-dlp fails, try page extraction
+                pass
+        
+        # Fallback: Extract from page
+        from bs4 import BeautifulSoup
+        from playwright.sync_api import sync_playwright
+        
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(headless=True)
+            page = browser.new_page()
+            page.goto(url, wait_until="networkidle", timeout=30000)
+            
+            _dismiss_age_gate(page)
+            _scroll_to_load_all(page, max_rounds=10)
+            
+            videos = page.evaluate("""
+                () => {
+                    const results = [];
+                    const videoTags = document.querySelectorAll('video');
+                    
+                    for (const video of videoTags) {
+                        const style = window.getComputedStyle(video);
+                        const width = parseInt(style.width) || video.offsetWidth || 0;
+                        const height = parseInt(style.height) || video.offsetHeight || 0;
+                        const area = width * height;
+                        const display = style.display;
+                        const visible = display !== 'none' && style.visibility !== 'hidden';
+                        
+                        let src = video.src || '';
+                        if (!src) {
+                            const source = video.querySelector('source');
+                            if (source) src = source.src || '';
+                        }
+                        
+                        const poster = video.poster || '';
+                        
+                        if (src) {
+                            results.push({
+                                src: src,
+                                width: width,
+                                height: height,
+                                area: area,
+                                visible: visible,
+                                title: video.title || '',
+                                poster: poster,
+                            });
+                        }
+                    }
+                    
+                    // Sort by area (largest first), prioritize visible videos
+                    results.sort((a, b) => {
+                        if (a.visible !== b.visible) return a.visible ? -1 : 1;
+                        return b.area - a.area;
+                    });
+                    
+                    return results;
+                }
+            """)
+            
+            browser.close()
+            
+            if videos and len(videos) > 0:
+                main_video = videos[0]
+                return jsonify({
+                    "title": main_video.get("title", "video"),
+                    "thumbnail": main_video.get("poster", ""),
+                    "duration": 0,
+                    "platform": "page-html",
+                    "url_preview": main_video.get("src", "")[:100],
+                })
+        
+        return jsonify({"error": "No video found on this page"}), 404
+
+    except Exception as e:
+        return jsonify({"error": f"Preview failed: {str(e)}"}), 500
+
+
+@app.route("/api/main-video-download", methods=["POST"])
+def main_video_download():
+    """Extract and download the main/primary video from a webpage."""
+    data = request.get_json()
+    url = (data or {}).get("url", "").strip()
+    folder_name = (data or {}).get("folder_name", "").strip()
+
+    if not url:
+        return jsonify({"error": "URL is required"}), 400
+
+    parsed = urlparse(url)
+    if not parsed.scheme:
+        url = "https://" + url
+        parsed = urlparse(url)
+    if not parsed.netloc:
+        return jsonify({"error": "Invalid URL"}), 400
+
+    job_id = str(uuid.uuid4())
+    with jobs_lock:
+        jobs[job_id] = {"events": [], "output_dir": None}
+
+    thread = threading.Thread(
+        target=run_main_video_download_job, args=(job_id, url, folder_name), daemon=True
     )
     thread.start()
 
@@ -1635,4 +1990,4 @@ def download_zip(job_id):
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=False)
+    app.run(host="0.0.0.0", port=5001, debug=False)

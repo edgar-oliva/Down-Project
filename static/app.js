@@ -202,6 +202,8 @@ function closeFolderModal() {
 function confirmModalDownload() {
     if (activeTab === "social") {
         confirmSocialDownload();
+    } else if (activeTab === "mainvideo") {
+        confirmMainVideoDownload();
     } else {
         confirmDownload();
     }
@@ -445,9 +447,15 @@ function resetUI() {
     document.getElementById("resultsSection").classList.add("hidden");
     document.getElementById("previewSection").classList.add("hidden");
     document.getElementById("scanningSpinner").classList.add("hidden");
+    document.getElementById("previewModal").classList.add("hidden");
+    document.getElementById("folderModal").classList.add("hidden");
     document.getElementById("urlInput").value = "";
     document.getElementById("urlInput").disabled = false;
     document.getElementById("scanBtn").disabled = false;
+    document.getElementById("mainVideoUrlInput").value = "";
+    document.getElementById("mainVideoUrlInput").disabled = false;
+    document.getElementById("mainVideoDownloadBtn").disabled = false;
+    document.getElementById("mainVideoPlatformBadge").classList.add("hidden");
     document.getElementById("socialUrlInput").value = "";
     document.getElementById("socialUrlInput").disabled = false;
     document.getElementById("socialDownloadBtn").disabled = false;
@@ -458,6 +466,8 @@ function resetUI() {
 
     if (activeTab === "website") {
         document.getElementById("urlInput").focus();
+    } else if (activeTab === "mainvideo") {
+        document.getElementById("mainVideoUrlInput").focus();
     } else {
         document.getElementById("socialUrlInput").focus();
     }
@@ -477,6 +487,7 @@ function switchTab(tab) {
 
     // Show/hide tab content
     document.getElementById("websiteTab").classList.toggle("hidden", tab !== "website");
+    document.getElementById("mainVideoTab").classList.toggle("hidden", tab !== "mainvideo");
     document.getElementById("socialTab").classList.toggle("hidden", tab !== "social");
 
     // Hide shared sections when switching
@@ -535,6 +546,140 @@ function updatePlatformBadge() {
     } else {
         badge.classList.add("hidden");
     }
+}
+
+// -----------------------------------------------------------------------
+// Main Video extraction
+// -----------------------------------------------------------------------
+
+function mainVideoDownload() {
+    const urlInput = document.getElementById("mainVideoUrlInput");
+    const url = urlInput.value.trim();
+    if (!url) {
+        urlInput.focus();
+        return;
+    }
+
+    // Disable button and show loading
+    document.getElementById("mainVideoDownloadBtn").disabled = true;
+    urlInput.disabled = true;
+    
+    addLog("Fetching video preview...", "info");
+
+    fetch("/api/preview-main-video", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url: url }),
+    })
+        .then((r) => r.json())
+        .then((data) => {
+            document.getElementById("mainVideoDownloadBtn").disabled = false;
+            urlInput.disabled = false;
+            
+            if (data.error) {
+                addLog("Error: " + data.error, "error");
+                return;
+            }
+
+            // Show preview modal
+            document.getElementById("previewTitle").textContent = data.title;
+            document.getElementById("previewPlatform").textContent = data.platform;
+            
+            const thumbnail = document.getElementById("previewThumbnail");
+            if (data.thumbnail) {
+                thumbnail.src = data.thumbnail;
+                thumbnail.classList.remove("hidden");
+            } else {
+                thumbnail.classList.add("hidden");
+            }
+            
+            const durationDiv = document.getElementById("previewDurationDiv");
+            if (data.duration && data.duration > 0) {
+                const mins = Math.floor(data.duration / 60);
+                const secs = data.duration % 60;
+                document.getElementById("previewDuration").textContent = mins + "m " + secs + "s";
+                durationDiv.style.display = "flex";
+            } else {
+                durationDiv.style.display = "none";
+            }
+            
+            document.getElementById("previewModal").classList.remove("hidden");
+        })
+        .catch((err) => {
+            document.getElementById("mainVideoDownloadBtn").disabled = false;
+            urlInput.disabled = false;
+            addLog("Preview failed: " + err, "error");
+        });
+}
+
+function closePreviewModal() {
+    document.getElementById("previewModal").classList.add("hidden");
+}
+
+function proceedToDownload() {
+    closePreviewModal();
+    const url = document.getElementById("mainVideoUrlInput").value.trim();
+    
+    // Pre-fill with default name
+    const parsed = new URL(url);
+    const host = parsed.hostname.replace("www.", "");
+    const defaultName = "main_video_" + host;
+    
+    const input = document.getElementById("folderNameInput");
+    input.value = defaultName;
+    document.getElementById("folderModal").classList.remove("hidden");
+    setTimeout(() => { input.focus(); input.select(); }, 50);
+}
+
+function confirmMainVideoDownload() {
+    const folderName = document.getElementById("folderNameInput").value.trim();
+    closeFolderModal();
+
+    const url = document.getElementById("mainVideoUrlInput").value.trim();
+    if (!url) return;
+
+    document.getElementById("progressSection").classList.remove("hidden");
+    document.getElementById("resultsSection").classList.add("hidden");
+    document.getElementById("logContent").innerHTML = "";
+    document.getElementById("scanResults").classList.add("hidden");
+    document.getElementById("currentFile").classList.remove("hidden");
+    document.getElementById("overallProgress").style.width = "0%";
+    document.getElementById("statusText").textContent = "Detecting main video...";
+    document.getElementById("etaText").textContent = "";
+    document.getElementById("progressDetail").textContent = "";
+    document.getElementById("bytesDownloaded").textContent = "";
+    document.getElementById("currentFileName").textContent = "";
+    document.getElementById("mainVideoDownloadBtn").disabled = true;
+    document.getElementById("mainVideoUrlInput").disabled = true;
+
+    const platform = detectPlatform(url);
+    addLog("Extracting main video from " + (platform ? platform.name : url) + "...", "info");
+
+    const payload = { url: url };
+    if (folderName) payload.folder_name = folderName;
+
+    fetch("/api/main-video-download", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+    })
+        .then((r) => r.json())
+        .then((data) => {
+            if (data.error) {
+                addLog("Error: " + data.error, "error");
+                document.getElementById("statusText").textContent = "Error";
+                document.getElementById("mainVideoDownloadBtn").disabled = false;
+                document.getElementById("mainVideoUrlInput").disabled = false;
+                return;
+            }
+            currentJobId = data.job_id;
+            listenToProgress(data.job_id);
+        })
+        .catch((err) => {
+            addLog("Request failed: " + err, "error");
+            document.getElementById("mainVideoDownloadBtn").disabled = false;
+            document.getElementById("mainVideoUrlInput").disabled = false;
+        });
 }
 
 // -----------------------------------------------------------------------
@@ -638,6 +783,39 @@ document.getElementById("socialUrlInput").addEventListener("paste", function () 
 document.getElementById("socialUrlInput").addEventListener("keydown", function (e) {
     if (e.key === "Enter") {
         socialDownload();
+    }
+});
+
+// Main Video URL input: detect platform on input, Enter to download
+document.getElementById("mainVideoUrlInput").addEventListener("input", function () {
+    const url = document.getElementById("mainVideoUrlInput").value.trim();
+    const badge = document.getElementById("mainVideoPlatformBadge");
+    const platform = detectPlatform(url);
+    if (platform) {
+        badge.textContent = platform.name;
+        badge.className = "platform-badge " + platform.css;
+        badge.classList.remove("hidden");
+    } else {
+        badge.classList.add("hidden");
+    }
+});
+document.getElementById("mainVideoUrlInput").addEventListener("paste", function () {
+    setTimeout(() => {
+        const url = document.getElementById("mainVideoUrlInput").value.trim();
+        const badge = document.getElementById("mainVideoPlatformBadge");
+        const platform = detectPlatform(url);
+        if (platform) {
+            badge.textContent = platform.name;
+            badge.className = "platform-badge " + platform.css;
+            badge.classList.remove("hidden");
+        } else {
+            badge.classList.add("hidden");
+        }
+    }, 0);
+});
+document.getElementById("mainVideoUrlInput").addEventListener("keydown", function (e) {
+    if (e.key === "Enter") {
+        mainVideoDownload();
     }
 });
 
