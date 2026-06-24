@@ -293,6 +293,9 @@ def download_with_ytdlp(url: str, output_dir: str, job_id: str) -> bool:
         return False
 
     def progress_hook(d):
+        with jobs_lock:
+            if jobs.get(job_id, {}).get("cancelled"):
+                raise Exception("Download cancelled by user")
         if d["status"] == "downloading":
             total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
             downloaded = d.get("downloaded_bytes", 0)
@@ -1660,6 +1663,9 @@ def run_social_download_job(job_id: str, url: str, folder_name: str):
             return
 
         def progress_hook(d):
+            with jobs_lock:
+                if jobs.get(job_id, {}).get("cancelled"):
+                    raise Exception("Download cancelled by user")
             if d["status"] == "downloading":
                 total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
                 downloaded = d.get("downloaded_bytes", 0)
@@ -1761,7 +1767,7 @@ def social_download():
 
     job_id = str(uuid.uuid4())
     with jobs_lock:
-        jobs[job_id] = {"events": [], "output_dir": None}
+        jobs[job_id] = {"events": [], "output_dir": None, "cancelled": False}
 
     thread = threading.Thread(
         target=run_social_download_job, args=(job_id, url, folder_name), daemon=True
@@ -1902,7 +1908,7 @@ def main_video_download():
 
     job_id = str(uuid.uuid4())
     with jobs_lock:
-        jobs[job_id] = {"events": [], "output_dir": None}
+        jobs[job_id] = {"events": [], "output_dir": None, "cancelled": False}
 
     thread = threading.Thread(
         target=run_main_video_download_job, args=(job_id, url, folder_name), daemon=True
@@ -1932,7 +1938,7 @@ def start_download():
 
     job_id = str(uuid.uuid4())
     with jobs_lock:
-        jobs[job_id] = {"events": [], "output_dir": None}
+        jobs[job_id] = {"events": [], "output_dir": None, "cancelled": False}
 
     thread = threading.Thread(
         target=run_download_job, args=(job_id, url, mode, selected_urls, folder_name), daemon=True
@@ -1987,6 +1993,15 @@ def download_zip(job_id):
 
     return send_file(str(zip_path), as_attachment=True,
                      download_name=f"{output_dir.name}.zip")
+
+
+@app.route("/api/cancel/<job_id>", methods=["POST"])
+def cancel_job(job_id):
+    with jobs_lock:
+        if job_id not in jobs:
+            return jsonify({"error": "Job not found"}), 404
+        jobs[job_id]["cancelled"] = True
+    return jsonify({"status": "cancelling"})
 
 
 if __name__ == "__main__":

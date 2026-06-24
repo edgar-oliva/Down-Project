@@ -121,7 +121,10 @@
         <div id="progressSection" class="progress-section hidden">
             <div class="progress-header">
                 <span id="statusText">Initializing...</span>
-                <span id="etaText"></span>
+                <div class="progress-header-right">
+                    <span id="etaText"></span>
+                    <button id="stopBtn" class="stop-btn" onclick="stopDownload()">Stop</button>
+                </div>
             </div>
 
             <!-- Scan Results -->

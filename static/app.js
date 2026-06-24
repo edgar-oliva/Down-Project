@@ -238,6 +238,9 @@ function confirmDownload() {
     document.getElementById("bytesDownloaded").textContent = "";
     document.getElementById("scanBtn").disabled = true;
     document.getElementById("urlInput").disabled = true;
+    const stopBtn = document.getElementById("stopBtn");
+    stopBtn.disabled = false;
+    stopBtn.textContent = "Stop";
 
     addLog("Downloading " + selectedUrls.length + " selected items...", "info");
 
@@ -387,6 +390,7 @@ function listenToProgress(jobId) {
         eventSource.close();
         eventSource = null;
 
+        document.getElementById("stopBtn").disabled = true;
         document.getElementById("overallProgress").style.width = "100%";
         document.getElementById("statusText").textContent = "Complete!";
         document.getElementById("etaText").textContent = "";
@@ -425,6 +429,7 @@ function listenToProgress(jobId) {
         } catch (_) {}
         addLog("Error: " + msg, "error");
         document.getElementById("statusText").textContent = "Error occurred";
+        document.getElementById("stopBtn").disabled = true;
         document.getElementById("scanBtn").disabled = false;
         document.getElementById("urlInput").disabled = false;
         document.getElementById("socialDownloadBtn").disabled = false;
@@ -434,6 +439,16 @@ function listenToProgress(jobId) {
             eventSource = null;
         }
     });
+}
+
+function stopDownload() {
+    if (!currentJobId) return;
+    const btn = document.getElementById("stopBtn");
+    btn.disabled = true;
+    btn.textContent = "Stopping...";
+    fetch("/api/cancel/" + currentJobId, { method: "POST" })
+        .then(() => addLog("Stop requested — finishing current segment...", "error"))
+        .catch(() => addLog("Stop request failed.", "error"));
 }
 
 function downloadZip() {
@@ -651,6 +666,9 @@ function confirmMainVideoDownload() {
     document.getElementById("currentFileName").textContent = "";
     document.getElementById("mainVideoDownloadBtn").disabled = true;
     document.getElementById("mainVideoUrlInput").disabled = true;
+    const stopBtnMV = document.getElementById("stopBtn");
+    stopBtnMV.disabled = false;
+    stopBtnMV.textContent = "Stop";
 
     const platform = detectPlatform(url);
     addLog("Extracting main video from " + (platform ? platform.name : url) + "...", "info");
@@ -733,6 +751,9 @@ function confirmSocialDownload() {
     document.getElementById("currentFileName").textContent = "";
     document.getElementById("socialDownloadBtn").disabled = true;
     document.getElementById("socialUrlInput").disabled = true;
+    const stopBtnSocial = document.getElementById("stopBtn");
+    stopBtnSocial.disabled = false;
+    stopBtnSocial.textContent = "Stop";
 
     const platform = detectPlatform(url);
     addLog("Downloading from " + (platform ? platform.name : url) + "...", "info");

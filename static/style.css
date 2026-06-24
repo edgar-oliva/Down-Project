@@ -317,6 +317,12 @@ header h1 {
     margin-bottom: 16px;
 }
 
+.progress-header-right {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
 #statusText {
     font-weight: 600;
     font-size: 1rem;
@@ -327,6 +333,30 @@ header h1 {
     font-size: 0.9rem;
     color: #888;
     font-variant-numeric: tabular-nums;
+}
+
+.stop-btn {
+    background: transparent;
+    color: #f87171;
+    border: 1px solid #f87171;
+    border-radius: 8px;
+    padding: 5px 14px;
+    font-size: 0.85rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.stop-btn:hover {
+    background: #f87171;
+    color: #0f0f1a;
+}
+
+.stop-btn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+    background: transparent;
+    color: #f87171;
 }
 
 /* Scan Results */
